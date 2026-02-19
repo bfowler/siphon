@@ -185,6 +185,35 @@ public class SqlServerReader : IAsyncDisposable
     }
 
     /// <summary>
+    /// Gets all user tables from the database.
+    /// </summary>
+    /// <returns>A list of table names in "schema.table" format.</returns>
+    public async Task<List<string>> GetAllTablesAsync()
+    {
+        await EnsureConnectionAsync();
+
+        var tables = new List<string>();
+
+        var query = @"
+            SELECT TABLE_SCHEMA, TABLE_NAME 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_TYPE = 'BASE TABLE'
+            ORDER BY TABLE_SCHEMA, TABLE_NAME";
+
+        await using var cmd = new SqlCommand(query, _connection);
+        await using var reader = await cmd.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            var schema = reader.GetString(0);
+            var table = reader.GetString(1);
+            tables.Add($"{schema}.{table}");
+        }
+
+        return tables;
+    }
+
+    /// <summary>
     /// Disposes the connection asynchronously.
     /// </summary>
     public async ValueTask DisposeAsync()

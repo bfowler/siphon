@@ -18,7 +18,7 @@ var databaseOption = new Option<string>("--database", "-d")
 
 var tableOption = new Option<List<string>>("--table", "-t")
 {
-    Description = "Table names to extract (schema.table format, can specify multiple)",
+    Description = "Table names to extract (supports wildcards: * and ?)",
     AllowMultipleArgumentsPerToken = true
 };
 
@@ -158,6 +158,46 @@ static async Task RunAsync(ConnectionOptions options)
         ConsoleExtensions.WriteSuccess("Connected successfully.");
         Console.WriteLine();
 
+        var expandedTables = new List<string>();
+        var hasWildcards = options.Tables.Any(ContainsWildcard);
+
+        if (hasWildcards)
+        {
+            ConsoleExtensions.WriteInfo("Discovering tables for wildcard patterns...");
+            var allTables = await reader.GetAllTablesAsync();
+
+            foreach (var tableSpec in options.Tables)
+            {
+                if (ContainsWildcard(tableSpec))
+                {
+                    var matches = allTables
+                        .Where(t => WildcardMatcher.IsMatch(tableSpec, t))
+                        .ToList();
+
+                    if (matches.Count == 0)
+                    {
+                        ConsoleExtensions.WriteWarning($"  Pattern '{tableSpec}' matched no tables");
+                    }
+                    else
+                    {
+                        ConsoleExtensions.WriteSuccess($"  Pattern '{tableSpec}' matched {matches.Count} table(s)");
+                        expandedTables.AddRange(matches);
+                    }
+                }
+                else
+                {
+                    expandedTables.Add(tableSpec);
+                }
+            }
+
+            expandedTables = expandedTables.Distinct().ToList();
+            Console.WriteLine();
+        }
+        else
+        {
+            expandedTables = options.Tables;
+        }
+
         using var writer = new SqliteWriter(options.OutputPath);
         await writer.InitializeAsync(options.Overwrite);
         ConsoleExtensions.WriteSuccess($"Created SQLite database: {options.OutputPath}");
@@ -166,7 +206,7 @@ static async Task RunAsync(ConnectionOptions options)
         var totalRows = 0L;
         var tablesProcessed = 0;
 
-        foreach (var tableSpec in options.Tables)
+        foreach (var tableSpec in expandedTables)
         {
             var (schema, tableName) = ParseTableName(tableSpec);
 
@@ -220,7 +260,15 @@ static async Task RunAsync(ConnectionOptions options)
         }
 
         ConsoleExtensions.WriteInfo("Summary:");
-        Console.WriteLine($"  Tables processed: {tablesProcessed}");
+        if (hasWildcards)
+        {
+            Console.WriteLine($"  Patterns specified: {options.Tables.Count}");
+            Console.WriteLine($"  Tables processed:   {tablesProcessed}");
+        }
+        else
+        {
+            Console.WriteLine($"  Tables processed: {tablesProcessed}");
+        }
         Console.WriteLine($"  Total rows:       {totalRows:N0}");
         Console.WriteLine($"  Output file:      {Path.GetFullPath(options.OutputPath)}");
         Console.WriteLine();
@@ -252,4 +300,9 @@ static (string schema, string table) ParseTableName(string tableSpec)
     return parts.Length == 2
         ? (parts[0], parts[1])
         : ("dbo", parts[0]);
+}
+
+static bool ContainsWildcard(string tableSpec)
+{
+    return tableSpec.Contains('*') || tableSpec.Contains('?');
 }

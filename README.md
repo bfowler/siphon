@@ -55,7 +55,7 @@ Available RIDs: `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, `li
 |--------|-------|-------------|
 | `--server` | `-s` | SQL Server hostname or instance name |
 | `--database` | `-d` | Source database name |
-| `--table` | `-t` | Table name(s) to extract (format: `schema.table`, can specify multiple) |
+| `--table` | `-t` | Table name(s) to extract (supports wildcards: `*` and `?`) |
 | `--output` | `-o` | Output SQLite file path |
 | `--username` | `-u` | SQL authentication username (optional) |
 | `--password` | `-p` | SQL authentication password (optional) |
@@ -103,6 +103,42 @@ siphon -s "MYSERVER\SQLEXPRESS" -d MyDatabase -t dbo.Users -o users.db -w
 
 ```bash
 siphon -s localhost -d MyDatabase -t dbo.Logs -o logs.db -w --overwrite
+```
+
+### Wildcard Table Selection
+
+Use shell-style wildcards to match multiple tables at once:
+
+| Wildcard | Meaning |
+|----------|---------|
+| `*` | Matches zero or more of any character |
+| `?` | Matches exactly one of any character |
+
+Patterns match against the full `schema.table` name.
+
+#### Extract All Tables in a Schema
+
+```bash
+siphon -s localhost -d MyDatabase -t sales.* -o sales_data.db -w
+```
+
+#### Extract Multiple Matching Tables
+
+```bash
+siphon -s localhost -d MyDatabase -t "*.Customer*" -o customers.db -w
+```
+
+#### Mix Exact Tables and Wildcards
+
+```bash
+siphon -s localhost -d MyDatabase -t dbo.Users -t sales.* -t reporting.Report* -o data.db -w
+```
+
+#### Single Character Wildcard
+
+```bash
+siphon -s localhost -d MyDatabase -t dbo.Table? -o tables.db -w
+# Matches: dbo.Table1, dbo.Table2, dbo.TableA, etc.
 ```
 
 ## How It Works
