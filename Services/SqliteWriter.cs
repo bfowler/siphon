@@ -71,7 +71,7 @@ public sealed class SqliteWriter : IDisposable
             throw new InvalidOperationException("Database not initialized. Call InitializeAsync first.");
 
         using var dropCommand = _connection.CreateCommand();
-        dropCommand.CommandText = $"DROP TABLE IF EXISTS [{tableMapping.DestinationTable}];";
+        dropCommand.CommandText = $"DROP TABLE IF EXISTS {SqlIdentifier.Sqlite(tableMapping.DestinationTable)};";
         await dropCommand.ExecuteNonQueryAsync();
 
         var createSql = BuildCreateTableSql(tableMapping);
@@ -157,7 +157,7 @@ public sealed class SqliteWriter : IDisposable
     private static string BuildCreateTableSql(TableMapping tableMapping)
     {
         var sb = new StringBuilder();
-        sb.Append($"CREATE TABLE [{tableMapping.DestinationTable}] (");
+        sb.Append($"CREATE TABLE {SqlIdentifier.Sqlite(tableMapping.DestinationTable)} (");
 
         var primaryKeys = tableMapping.Columns
             .Where(c => c.IsPrimaryKey)
@@ -170,7 +170,7 @@ public sealed class SqliteWriter : IDisposable
             if (i > 0)
                 sb.Append(", ");
 
-            sb.Append($"[{column.DestinationColumn}] {column.DestinationType}");
+            sb.Append($"{SqlIdentifier.Sqlite(column.DestinationColumn)} {column.DestinationType}");
 
             if (!column.IsNullable)
                 sb.Append(" NOT NULL");
@@ -183,7 +183,7 @@ public sealed class SqliteWriter : IDisposable
             {
                 if (i > 0)
                     sb.Append(", ");
-                sb.Append($"[{primaryKeys[i]}]");
+                sb.Append(SqlIdentifier.Sqlite(primaryKeys[i]));
             }
             sb.Append(")");
         }
@@ -195,13 +195,13 @@ public sealed class SqliteWriter : IDisposable
     private static string BuildInsertSql(TableMapping tableMapping)
     {
         var sb = new StringBuilder();
-        sb.Append($"INSERT INTO [{tableMapping.DestinationTable}] (");
+        sb.Append($"INSERT INTO {SqlIdentifier.Sqlite(tableMapping.DestinationTable)} (");
 
         for (int i = 0; i < tableMapping.Columns.Count; i++)
         {
             if (i > 0)
                 sb.Append(", ");
-            sb.Append($"[{tableMapping.Columns[i].DestinationColumn}]");
+            sb.Append(SqlIdentifier.Sqlite(tableMapping.Columns[i].DestinationColumn));
         }
 
         sb.Append(") VALUES (");

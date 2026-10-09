@@ -1,5 +1,4 @@
 using System.CommandLine;
-using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Siphon.Extensions;
@@ -125,12 +124,12 @@ rootCommand.SetAction(async parseResult =>
         Overwrite = overwrite
     };
 
-    await RunAsync(options);
+    return await RunAsync(options);
 });
 
-return rootCommand.Parse(args).Invoke();
+return await rootCommand.Parse(args).InvokeAsync();
 
-static async Task RunAsync(ConnectionOptions options)
+static async Task<int> RunAsync(ConnectionOptions options)
 {
     ConsoleExtensions.WriteInfo("Siphon - SQL Server to SQLite Extractor");
     Console.WriteLine();
@@ -152,137 +151,75 @@ static async Task RunAsync(ConnectionOptions options)
         if (!connected)
         {
             ConsoleExtensions.WriteError("Failed to connect to SQL Server. Check your connection settings.");
-            Environment.Exit(1);
-            return;
+            return 1;
         }
         ConsoleExtensions.WriteSuccess("Connected successfully.");
         Console.WriteLine();
 
-        var expandedTables = new List<string>();
-        var hasWildcards = options.Tables.Any(ContainsWildcard);
-
+        var hasWildcards = options.Tables.Any(ExportPreflight.ContainsWildcard);
         if (hasWildcards)
-        {
             ConsoleExtensions.WriteInfo("Discovering tables for wildcard patterns...");
-            var allTables = await reader.GetAllTablesAsync();
-
-            foreach (var tableSpec in options.Tables)
-            {
-                if (ContainsWildcard(tableSpec))
-                {
-                    var matches = allTables
-                        .Where(t => WildcardMatcher.IsMatch(tableSpec, t))
-                        .ToList();
-
-                    if (matches.Count == 0)
-                    {
-                        ConsoleExtensions.WriteWarning($"  Pattern '{tableSpec}' matched no tables");
-                    }
-                    else
-                    {
-                        ConsoleExtensions.WriteSuccess($"  Pattern '{tableSpec}' matched {matches.Count} table(s)");
-                        expandedTables.AddRange(matches);
-                    }
-                }
-                else
-                {
-                    expandedTables.Add(tableSpec);
-                }
-            }
-
-            expandedTables = expandedTables.Distinct().ToList();
-            Console.WriteLine();
-        }
-        else
+        var mappings = await ExportPreflight.BuildAsync(reader, options.Tables, (pattern, count) =>
         {
-            expandedTables = options.Tables;
-        }
+            if (count == 0)
+            {
+                ConsoleExtensions.WriteWarning($"  Pattern '{pattern}' matched no tables");
+            }
+            else
+            {
+                ConsoleExtensions.WriteSuccess($"  Pattern '{pattern}' matched {count} table(s)");
+            }
+        });
+        Console.WriteLine();
 
         using var writer = new SqliteWriter(options.OutputPath);
         await writer.InitializeAsync(options.Overwrite);
         ConsoleExtensions.WriteSuccess($"Created SQLite database: {options.OutputPath}");
         Console.WriteLine();
 
-        var totalRows = 0L;
-        var tablesProcessed = 0;
-
-        foreach (var tableSpec in expandedTables)
+        var result = await TableExportRunner.RunAsync(mappings,
+            mapping => ExportTableAsync(mapping, reader, writer),
+            (_, ex) =>
         {
-            var (schema, tableName) = ParseTableName(tableSpec);
-
-            ConsoleExtensions.WriteInfo($"Processing table: {schema}.{tableName}");
-
-            try
-            {
-                var tableMapping = await reader.GetTableSchemaAsync(schema, tableName);
-                Console.WriteLine($"  Columns: {tableMapping.Columns.Count}");
-
-                await writer.CreateTableAsync(tableMapping);
-                ConsoleExtensions.WriteSuccess($"  Created table: {tableName}");
-
-                var rowCount = await reader.GetRowCountAsync(schema, tableName);
-                Console.WriteLine($"  Source rows: {rowCount:N0}");
-
-                if (rowCount > 0)
-                {
-                    var lastProgress = 0;
-
-                    var records = reader.ReadTableDataAsync(schema, tableName);
-                    var inserted = await writer.InsertDataAsync(
-                        tableMapping,
-                        records,
-                        batchSize: 1000,
-                        progressCallback: rows =>
-                        {
-                            if (rowCount > 0)
-                            {
-                                var progress = (int)Math.Min(rows, rowCount);
-                                if (progress > lastProgress)
-                                {
-                                    ConsoleExtensions.WriteProgress(progress, (int)rowCount, $"{tableName}");
-                                    lastProgress = progress;
-                                }
-                            }
-                        });
-
-                    totalRows += inserted;
-                    ConsoleExtensions.WriteSuccess($"  Transferred {inserted:N0} rows");
-                }
-
-                tablesProcessed++;
-                Console.WriteLine();
-            }
-            catch (InvalidOperationException ex)
-            {
-                ConsoleExtensions.WriteError($"  Error: {ex.Message}");
-                Console.WriteLine();
-            }
-        }
+            ConsoleExtensions.WriteError($"  Error: {ex.Message}");
+            Console.WriteLine();
+        });
 
         ConsoleExtensions.WriteInfo("Summary:");
         if (hasWildcards)
         {
             Console.WriteLine($"  Patterns specified: {options.Tables.Count}");
-            Console.WriteLine($"  Tables processed:   {tablesProcessed}");
+            Console.WriteLine($"  Tables processed:   {result.TablesProcessed}");
         }
         else
         {
-            Console.WriteLine($"  Tables processed: {tablesProcessed}");
+            Console.WriteLine($"  Tables processed: {result.TablesProcessed}");
         }
-        Console.WriteLine($"  Total rows:       {totalRows:N0}");
+        if (result.TablesFailed > 0)
+            Console.WriteLine($"  Tables failed:    {result.TablesFailed}");
+        Console.WriteLine($"  Total rows:       {result.TotalRows:N0}");
         Console.WriteLine($"  Output file:      {Path.GetFullPath(options.OutputPath)}");
         Console.WriteLine();
-        ConsoleExtensions.WriteSuccess("Extraction completed successfully.");
+        if (result.ExitCode == 0)
+            ConsoleExtensions.WriteSuccess(result.CompletionMessage);
+        else
+            ConsoleExtensions.WriteError(result.CompletionMessage);
+        return result.ExitCode;
+    }
+    catch (InvalidOperationException ex)
+    {
+        ConsoleExtensions.WriteError($"Error: {ex.Message}");
+        return 1;
     }
     catch (SqlException ex)
     {
         ConsoleExtensions.WriteError($"SQL Server error: {ex.Message}");
-        Environment.Exit(1);
+        return 1;
     }
     catch (SqliteException ex)
     {
         ConsoleExtensions.WriteError($"SQLite error: {ex.Message}");
-        Environment.Exit(1);
+        return 1;
     }
     catch (Exception ex)
     {
@@ -290,19 +227,37 @@ static async Task RunAsync(ConnectionOptions options)
         Console.WriteLine();
         Console.WriteLine("Stack trace:");
         Console.WriteLine(ex.StackTrace);
-        Environment.Exit(1);
+        return 1;
     }
 }
 
-static (string schema, string table) ParseTableName(string tableSpec)
+static async Task<long> ExportTableAsync(TableMapping mapping, SqlServerReader reader, SqliteWriter writer)
 {
-    var parts = tableSpec.Split('.', 2, StringSplitOptions.TrimEntries);
-    return parts.Length == 2
-        ? (parts[0], parts[1])
-        : ("dbo", parts[0]);
-}
+    var identity = mapping.SourceIdentity!;
+    ConsoleExtensions.WriteInfo($"Processing table: {mapping.SourceTable}");
+    Console.WriteLine($"  Columns: {mapping.Columns.Count}");
+    await writer.CreateTableAsync(mapping);
+    ConsoleExtensions.WriteSuccess($"  Created table: {mapping.DestinationTable}");
 
-static bool ContainsWildcard(string tableSpec)
-{
-    return tableSpec.Contains('*') || tableSpec.Contains('?');
+    var rowCount = await reader.GetRowCountAsync(identity.SchemaName, identity.TableName);
+    Console.WriteLine($"  Source rows: {rowCount:N0}");
+    long inserted = 0;
+    if (rowCount > 0)
+    {
+        var lastProgress = 0;
+        inserted = await writer.InsertDataAsync(mapping, reader.ReadTableDataAsync(mapping),
+            batchSize: 1000, progressCallback: rows =>
+            {
+                var progress = (int)Math.Min(rows, rowCount);
+                if (progress > lastProgress)
+                {
+                    ConsoleExtensions.WriteProgress(progress, (int)rowCount, identity.TableName);
+                    lastProgress = progress;
+                }
+            });
+        ConsoleExtensions.WriteSuccess($"  Transferred {inserted:N0} rows");
+    }
+
+    Console.WriteLine();
+    return inserted;
 }

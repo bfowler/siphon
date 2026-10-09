@@ -5,6 +5,8 @@ namespace Siphon.Models;
 /// </summary>
 public class TableMapping
 {
+    internal SourceTableIdentity? SourceIdentity { get; init; }
+
     /// <summary>
     /// Full source table name including schema (e.g., "dbo.Customers").
     /// </summary>

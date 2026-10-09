@@ -48,11 +48,35 @@ public class SqlServerReader : IAsyncDisposable
     /// <returns>A <see cref="TableMapping"/> containing column information.</returns>
     /// <exception cref="InvalidOperationException">Thrown when the table does not exist.</exception>
     public async Task<TableMapping> GetTableSchemaAsync(string schemaName, string tableName)
+        => await GetTableSchemaAsync(await ResolveTableAsync(schemaName, tableName));
+
+    internal async Task<SourceTableIdentity> ResolveTableAsync(string schemaName, string tableName)
+    {
+        await EnsureConnectionAsync();
+        const string query = """
+            SELECT t.object_id, s.name, t.name
+            FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE s.name = @schemaName AND t.name = @tableName
+            """;
+        await using var cmd = new SqlCommand(query, _connection);
+        cmd.Parameters.AddWithValue("@schemaName", schemaName);
+        cmd.Parameters.AddWithValue("@tableName", tableName);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+            throw new InvalidOperationException($"Table '{schemaName}.{tableName}' does not exist or has no columns.");
+        return new SourceTableIdentity(reader.GetInt32(0), reader.GetString(1), reader.GetString(2));
+    }
+
+    internal async Task<TableMapping> GetTableSchemaAsync(SourceTableIdentity identity)
     {
         await EnsureConnectionAsync();
 
+        var schemaName = identity.SchemaName;
+        var tableName = identity.TableName;
+
         var mapping = new TableMapping
         {
+            SourceIdentity = identity,
             SourceSchema = schemaName,
             SourceTable = $"{schemaName}.{tableName}",
             DestinationTable = tableName
@@ -81,7 +105,7 @@ public class SqlServerReader : IAsyncDisposable
                 var dataType = reader.GetString(1);
                 var isNullable = reader.GetString(2) == "YES";
 
-                columnsDict[columnName] = new ColumnMapping
+                var column = new ColumnMapping
                 {
                     SourceColumn = columnName,
                     SourceType = dataType,
@@ -90,6 +114,8 @@ public class SqlServerReader : IAsyncDisposable
                     IsNullable = isNullable,
                     IsPrimaryKey = false
                 };
+                columnsDict.Add(columnName, column);
+                mapping.Columns.Add(column);
             }
         }
 
@@ -125,7 +151,6 @@ public class SqlServerReader : IAsyncDisposable
             }
         }
 
-        mapping.Columns = [.. columnsDict.Values];
         return mapping;
     }
 
@@ -142,8 +167,20 @@ public class SqlServerReader : IAsyncDisposable
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         await EnsureConnectionAsync(cancellationToken);
+        var mapping = await GetTableSchemaAsync(schemaName, tableName);
+        await foreach (var record in ReadTableDataAsync(mapping, cancellationToken))
+            yield return record;
+    }
 
-        var query = $"SELECT * FROM [{schemaName}].[{tableName}]";
+    internal async IAsyncEnumerable<IDataRecord> ReadTableDataAsync(
+        TableMapping mapping,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await EnsureConnectionAsync(cancellationToken);
+
+        var identity = mapping.SourceIdentity ?? throw new InvalidOperationException("Table mapping has no source identity.");
+        var projection = string.Join(", ", mapping.Columns.Select(c => SqlIdentifier.SqlServer(c.SourceColumn)));
+        var query = $"SELECT {projection} FROM {SqlIdentifier.SqlServer(identity.SchemaName)}.{SqlIdentifier.SqlServer(identity.TableName)}";
 
         await using var cmd = new SqlCommand(query, _connection);
         await using var reader = await cmd.ExecuteReaderAsync(
@@ -185,29 +222,29 @@ public class SqlServerReader : IAsyncDisposable
     }
 
     /// <summary>
-    /// Gets all user tables from the database.
+    /// Gets all base tables visible to the connection.
     /// </summary>
     /// <returns>A list of table names in "schema.table" format.</returns>
     public async Task<List<string>> GetAllTablesAsync()
+        => (await DiscoverTablesAsync()).Select(t => t.DisplayName).ToList();
+
+    internal async Task<List<SourceTableIdentity>> DiscoverTablesAsync()
     {
         await EnsureConnectionAsync();
 
-        var tables = new List<string>();
+        var tables = new List<SourceTableIdentity>();
 
         var query = @"
-            SELECT TABLE_SCHEMA, TABLE_NAME 
-            FROM INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_TYPE = 'BASE TABLE'
-            ORDER BY TABLE_SCHEMA, TABLE_NAME";
+            SELECT t.object_id, s.name, t.name
+            FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id
+            ORDER BY s.name, t.name";
 
         await using var cmd = new SqlCommand(query, _connection);
         await using var reader = await cmd.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
         {
-            var schema = reader.GetString(0);
-            var table = reader.GetString(1);
-            tables.Add($"{schema}.{table}");
+            tables.Add(new SourceTableIdentity(reader.GetInt32(0), reader.GetString(1), reader.GetString(2)));
         }
 
         return tables;
