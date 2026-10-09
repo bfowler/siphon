@@ -26,6 +26,7 @@ bld/
 *.exe
 *.pdb
 *.cache
+publish/
 
 # NuGet
 packages/
