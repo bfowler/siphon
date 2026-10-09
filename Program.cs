@@ -182,6 +182,7 @@ static async Task<int> RunAsync(ConnectionOptions options)
             (_, ex) =>
         {
             ConsoleExtensions.WriteError($"  Error: {ex.Message}");
+            ExportFailureContext.WriteTo(Console.Out, ex);
             Console.WriteLine();
         });
 
@@ -209,21 +210,25 @@ static async Task<int> RunAsync(ConnectionOptions options)
     catch (InvalidOperationException ex)
     {
         ConsoleExtensions.WriteError($"Error: {ex.Message}");
+        ExportFailureContext.WriteTo(Console.Out, ex);
         return 1;
     }
     catch (SqlException ex)
     {
         ConsoleExtensions.WriteError($"SQL Server error: {ex.Message}");
+        ExportFailureContext.WriteTo(Console.Out, ex);
         return 1;
     }
     catch (SqliteException ex)
     {
         ConsoleExtensions.WriteError($"SQLite error: {ex.Message}");
+        ExportFailureContext.WriteTo(Console.Out, ex);
         return 1;
     }
     catch (Exception ex)
     {
         ConsoleExtensions.WriteError($"Error: {ex.Message}");
+        ExportFailureContext.WriteTo(Console.Out, ex);
         Console.WriteLine();
         Console.WriteLine("Stack trace:");
         Console.WriteLine(ex.StackTrace);
@@ -236,28 +241,39 @@ static async Task<long> ExportTableAsync(TableMapping mapping, SqlServerReader r
     var identity = mapping.SourceIdentity!;
     ConsoleExtensions.WriteInfo($"Processing table: {mapping.SourceTable}");
     Console.WriteLine($"  Columns: {mapping.Columns.Count}");
-    await writer.CreateTableAsync(mapping);
-    ConsoleExtensions.WriteSuccess($"  Created table: {mapping.DestinationTable}");
-
-    var rowCount = await reader.GetRowCountAsync(identity.SchemaName, identity.TableName);
-    Console.WriteLine($"  Source rows: {rowCount:N0}");
-    long inserted = 0;
-    if (rowCount > 0)
+    var operation = "Create SQLite table";
+    try
     {
-        var lastProgress = 0;
-        inserted = await writer.InsertDataAsync(mapping, reader.ReadTableDataAsync(mapping),
-            batchSize: 1000, progressCallback: rows =>
-            {
-                var progress = (int)Math.Min(rows, rowCount);
-                if (progress > lastProgress)
-                {
-                    ConsoleExtensions.WriteProgress(progress, (int)rowCount, identity.TableName);
-                    lastProgress = progress;
-                }
-            });
-        ConsoleExtensions.WriteSuccess($"  Transferred {inserted:N0} rows");
-    }
+        await writer.CreateTableAsync(mapping);
+        ConsoleExtensions.WriteSuccess($"  Created table: {mapping.DestinationTable}");
 
-    Console.WriteLine();
-    return inserted;
+        operation = "Read source row count";
+        var rowCount = await reader.GetRowCountAsync(identity.SchemaName, identity.TableName);
+        Console.WriteLine($"  Source rows: {rowCount:N0}");
+        long inserted = 0;
+        if (rowCount > 0)
+        {
+            operation = "Transfer table";
+            var lastProgress = 0;
+            inserted = await writer.InsertDataAsync(mapping, reader.ReadTableDataAsync(mapping),
+                batchSize: 1000, progressCallback: rows =>
+                {
+                    var progress = (int)Math.Min(rows, rowCount);
+                    if (progress > lastProgress)
+                    {
+                        ConsoleExtensions.WriteProgress(progress, (int)rowCount, identity.TableName);
+                        lastProgress = progress;
+                    }
+                });
+            ConsoleExtensions.WriteSuccess($"  Transferred {inserted:N0} rows");
+        }
+
+        Console.WriteLine();
+        return inserted;
+    }
+    catch (Exception exception)
+    {
+        new ExportFailureContext(mapping.SourceTable, mapping.DestinationTable, operation).Attach(exception);
+        throw;
+    }
 }

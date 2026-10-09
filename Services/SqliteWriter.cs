@@ -1,7 +1,9 @@
 using System;
 using System.Data;
+using System.Data.SqlTypes;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 using Siphon.Models;
 
@@ -101,6 +103,10 @@ public sealed class SqliteWriter : IDisposable
         var columns = tableMapping.Columns;
         long totalRows = 0;
         int batchCount = 0;
+        long committedRows = 0;
+        long? rowNumber = null;
+        int? columnOrdinal = null;
+        var operation = "Begin SQLite batch";
 
         SqliteTransaction? transaction = null;
 
@@ -108,6 +114,8 @@ public sealed class SqliteWriter : IDisposable
         {
             transaction = (SqliteTransaction)await _connection.BeginTransactionAsync();
 
+            operation = "Read source row";
+            rowNumber = 1;
             await foreach (var record in records)
             {
                 using var command = _connection.CreateCommand();
@@ -117,33 +125,60 @@ public sealed class SqliteWriter : IDisposable
                 for (int i = 0; i < columns.Count; i++)
                 {
                     var column = columns[i];
-                    var value = record.GetValue(i);
+                    columnOrdinal = i;
+                    operation = "Read column";
+                    var value = ReadValue(record, i);
+                    operation = "Convert column";
                     var convertedValue = TypeMapper.ConvertValue(value, column.SourceType);
+                    operation = "Bind parameter";
                     var parameter = command.CreateParameter();
                     parameter.ParameterName = $"@p{i}";
                     parameter.Value = convertedValue ?? DBNull.Value;
                     command.Parameters.Add(parameter);
                 }
 
+                columnOrdinal = null;
+                operation = "Insert SQLite row";
                 await command.ExecuteNonQueryAsync();
                 totalRows++;
                 batchCount++;
 
                 if (batchCount >= batchSize)
                 {
+                    operation = "Commit SQLite batch";
                     await transaction.CommitAsync();
+                    committedRows = totalRows;
+                    operation = "Dispose SQLite batch";
                     await transaction.DisposeAsync();
+                    operation = "Report progress";
                     progressCallback?.Invoke((int)totalRows);
                     batchCount = 0;
+                    operation = "Begin SQLite batch";
                     transaction = (SqliteTransaction)await _connection.BeginTransactionAsync();
                 }
+                operation = "Read source row";
+                rowNumber = totalRows + 1;
             }
 
             if (batchCount > 0)
             {
+                rowNumber = totalRows;
+                operation = "Commit SQLite batch";
                 await transaction.CommitAsync();
+                committedRows = totalRows;
+                operation = "Report progress";
                 progressCallback?.Invoke((int)totalRows);
             }
+        }
+        catch (Exception exception)
+        {
+            var column = columnOrdinal is { } ordinal ? columns[ordinal] : null;
+            new ExportFailureContext(tableMapping.SourceTable, tableMapping.DestinationTable, operation,
+                rowNumber, totalRows, committedRows, column?.SourceColumn,
+                column is null ? null : ExportFailureContext.DescribeSourceType(column),
+                column?.DestinationColumn, column?.DestinationType,
+                columnOrdinal is null ? null : columnOrdinal + 1).Attach(exception);
+            throw;
         }
         finally
         {
@@ -152,6 +187,21 @@ public sealed class SqliteWriter : IDisposable
         }
 
         return totalRows;
+    }
+
+    private static object ReadValue(IDataRecord record, int ordinal)
+    {
+        if (record is SqlDataReader reader)
+        {
+            // GetValue narrows SQL decimal/numeric to System.Decimal, which cannot
+            // represent SQL Server's full precision and scale. Preserve SqlDecimal
+            // until the explicit conversion to SQLite REAL (or sql_variant TEXT).
+            if (reader.GetProviderSpecificFieldType(ordinal) == typeof(SqlDecimal))
+                return reader.GetSqlDecimal(ordinal);
+            if (reader.GetDataTypeName(ordinal) == "sql_variant")
+                return reader.GetSqlValue(ordinal);
+        }
+        return record.GetValue(ordinal);
     }
 
     private static string BuildCreateTableSql(TableMapping tableMapping)

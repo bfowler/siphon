@@ -258,6 +258,87 @@ public sealed class ExportCliTests(SqlServerFixture source) : IClassFixture<SqlS
     }
 
     [Fact]
+    public async Task FullPrecisionDecimalsAndVariantsTransferWithExistingStorageTypes()
+    {
+        using var workspace = new TestWorkspace();
+        var path = workspace.FilePath();
+        await using var schemaReader = new SqlServerReader(new ConnectionOptions
+        {
+            Server = source.Server, Database = "FixturesCI", UseWindowsAuth = true
+        });
+        var mapping = await schemaReader.GetTableSchemaAsync("dbo", "DecimalValues");
+        Assert.Collection(mapping.Columns.Where(c => c.SourceType is "decimal" or "numeric"),
+            c => Assert.Equal((38, 0), (c.NumericPrecision, c.NumericScale)),
+            c => Assert.Equal((38, 38), (c.NumericPrecision, c.NumericScale)),
+            c => Assert.Equal((18, 4), (c.NumericPrecision, c.NumericScale)),
+            c => Assert.Equal((38, 35), (c.NumericPrecision, c.NumericScale)));
+        await using var connection = source.Connect();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Id, Wide, Fraction, Ordinary, Computed, Variant, Amount, Marker FROM dbo.DecimalValues ORDER BY Id";
+        await using var expected = await command.ExecuteReaderAsync();
+        Assert.True(await expected.ReadAsync());
+        // Establish that this data reproduces the reported SqlClient overflow.
+        Assert.Throws<OverflowException>(() => expected.GetValue(1));
+        Assert.Throws<OverflowException>(() => expected.GetValue(2));
+        Assert.Throws<OverflowException>(() => expected.GetValue(4));
+
+        var result = await Export(path, false, "FixturesCI", "dbo.DecimalValues");
+        Assert.True(result.ExitCode == 0, result.Output + result.Error);
+        Assert.Equal(3, result.Metric("Total rows"));
+        using var destination = SqliteTestData.Open(path);
+        using var query = destination.CreateCommand();
+        query.CommandText = command.CommandText.Replace("dbo.DecimalValues", "DecimalValues");
+        using var actual = query.ExecuteReader();
+        do
+        {
+            Assert.True(actual.Read());
+            Assert.Equal(expected.GetInt32(0), actual.GetInt64(0));
+            for (var ordinal = 1; ordinal <= 4; ordinal++)
+            {
+                if (expected.IsDBNull(ordinal)) Assert.True(actual.IsDBNull(ordinal));
+                else Assert.Equal(expected.GetSqlDecimal(ordinal).ToDouble(), actual.GetDouble(ordinal));
+            }
+            if (expected.IsDBNull(5)) Assert.True(actual.IsDBNull(5));
+            else Assert.Equal(expected.GetSqlValue(5).ToString(), actual.GetString(5));
+            if (expected.IsDBNull(6)) Assert.True(actual.IsDBNull(6));
+            else Assert.Equal((double)expected.GetDecimal(6), actual.GetDouble(6));
+            if (expected.IsDBNull(7)) Assert.True(actual.IsDBNull(7));
+            else Assert.Equal(expected.GetString(7), actual.GetString(7));
+        } while (await expected.ReadAsync());
+        Assert.False(actual.Read());
+        Assert.Equal("real", SqliteTestData.Scalar(path, "SELECT typeof(Wide) FROM DecimalValues WHERE Id=1"));
+        Assert.Equal("text", SqliteTestData.Scalar(path, "SELECT typeof(Variant) FROM DecimalValues WHERE Id=1"));
+    }
+
+    [Fact]
+    public async Task NonDecimalVariantsKeepClrTextRepresentation()
+    {
+        using var workspace = new TestWorkspace();
+        var path = workspace.FilePath();
+        var result = await Export(path, false, "FixturesCI", "dbo.VariantValues");
+        Assert.True(result.ExitCode == 0, result.Output + result.Error);
+        Assert.Equal(17, result.Metric("Total rows"));
+        await using var connection = source.Connect();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT Id, Value FROM dbo.VariantValues ORDER BY Id";
+        await using var expected = await command.ExecuteReaderAsync();
+        using var destination = SqliteTestData.Open(path);
+        using var query = destination.CreateCommand();
+        query.CommandText = "SELECT Id, Value FROM VariantValues ORDER BY Id";
+        using var actual = query.ExecuteReader();
+        while (await expected.ReadAsync())
+        {
+            Assert.True(actual.Read());
+            Assert.Equal(expected.GetInt32(0), actual.GetInt64(0));
+            if (expected.IsDBNull(1)) Assert.True(actual.IsDBNull(1));
+            else Assert.Equal(expected.GetValue(1).ToString(), actual.GetString(1));
+        }
+        Assert.False(actual.Read());
+    }
+
+    [Fact]
     public async Task SqlReadFailureReturnsNonzeroAndLeavesExplicitPartialOutput()
     {
         using var workspace = new TestWorkspace();
@@ -265,6 +346,12 @@ public sealed class ExportCliTests(SqlServerFixture source) : IClassFixture<SqlS
         await SqliteTestData.SeedSentinel(path);
         var result = await Export(path, true, "FixturesCI", "dbo.Customer", "dbo.ReadFailure");
         Assert.Equal(1, result.ExitCode);
+        Assert.Contains("  Source table: dbo.ReadFailure", result.Lines);
+        Assert.Contains("  Destination table: ReadFailure", result.Lines);
+        Assert.Contains("  Operation: Read source row", result.Lines);
+        Assert.Contains("  Source row position: 1", result.Lines);
+        Assert.Contains("  Rows written: 0; rows committed: 0", result.Lines);
+        Assert.Contains("  Exception type: Microsoft.Data.SqlClient.SqlException", result.Lines);
         Assert.DoesNotContain("Extraction completed successfully.", result.Lines);
         Assert.Equal(1L, SqliteTestData.Scalar(path, "SELECT COUNT(*) FROM Customer"));
         Assert.Equal(0L, SqliteTestData.Scalar(path, "SELECT COUNT(*) FROM ReadFailure"));

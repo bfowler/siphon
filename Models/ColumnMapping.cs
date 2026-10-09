@@ -15,6 +15,12 @@ public class ColumnMapping
     /// </summary>
     public string SourceType { get; set; } = string.Empty;
 
+    /// <summary>Numeric precision reported by SQL Server, when applicable.</summary>
+    public int? NumericPrecision { get; set; }
+
+    /// <summary>Numeric scale reported by SQL Server, when applicable.</summary>
+    public int? NumericScale { get; set; }
+
     /// <summary>
     /// Column name in SQLite.
     /// </summary>

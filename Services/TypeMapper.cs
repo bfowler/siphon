@@ -1,4 +1,5 @@
 using System;
+using System.Data.SqlTypes;
 
 namespace Siphon.Services;
 
@@ -67,6 +68,8 @@ public static class TypeMapper
 
         return cleanType switch
         {
+            "decimal" => true,
+            "numeric" => true,
             "date" => true,
             "datetime" => true,
             "datetime2" => true,
@@ -86,7 +89,7 @@ public static class TypeMapper
     /// <returns>The converted value appropriate for SQLite storage, or null if the input is null.</returns>
     public static object? ConvertValue(object? value, string sqlServerType)
     {
-        if (value == null || value == DBNull.Value)
+        if (value == null || value == DBNull.Value || value is INullable { IsNull: true })
             return null;
 
         if (string.IsNullOrWhiteSpace(sqlServerType))
@@ -96,13 +99,33 @@ public static class TypeMapper
 
         return cleanType switch
         {
+            "decimal" or "numeric" when value is SqlDecimal sqlDecimal => sqlDecimal.ToDouble(),
             "date" or "datetime" or "datetime2" or "smalldatetime" => ConvertDateTime(value),
             "datetimeoffset" => ConvertDateTimeOffset(value),
             "uniqueidentifier" => ConvertGuid(value),
-            "sql_variant" => value.ToString(),
+            "sql_variant" => UnwrapSqlVariant(value).ToString(),
             _ => value
         };
     }
+
+    private static object UnwrapSqlVariant(object value) => value switch
+    {
+        // Preserve the previous CLR ToString behavior for non-decimal variants.
+        // Leave SqlDecimal intact so converting to TEXT never narrows its precision.
+        SqlBoolean sql => sql.Value,
+        SqlByte sql => sql.Value,
+        SqlInt16 sql => sql.Value,
+        SqlInt32 sql => sql.Value,
+        SqlInt64 sql => sql.Value,
+        SqlSingle sql => sql.Value,
+        SqlDouble sql => sql.Value,
+        SqlMoney sql => sql.Value,
+        SqlString sql => sql.Value,
+        SqlBinary sql => sql.Value,
+        SqlGuid sql => sql.Value,
+        SqlDateTime sql => sql.Value,
+        _ => value
+    };
 
     private static string StripParameters(string sqlServerType)
     {

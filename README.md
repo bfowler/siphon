@@ -161,6 +161,10 @@ Preflight failures leave an existing output file unchanged and do not create a m
 
 Transfers commit every 1,000 rows. A failure after transfer begins can leave completed tables and committed batches in a partial output database. Siphon returns a failure code and does not report successful extraction; it does not roll back the whole export or lock the source schema for the duration of the run.
 
+Transfer errors include the exception type, source and destination tables, operation, and rows written and committed for the failing table. Column read/conversion errors also identify the source and destination columns, their types, the one-based column ordinal, and decimal precision/scale. SQL Server and SQLite errors include their provider error codes. The additional context does not read or print row values or credentials.
+
+The source row position is one-based within the current stream, not a primary key or a stable row identifier; SQL Server reads have no guaranteed ordering. For stream-read errors, it identifies the next expected row position, which may not identify the server row that caused a query failure. Rows written include successful inserts in the pending batch; those rows are rolled back on failure. Rows committed count the batches retained in the output.
+
 ### Running Tests
 
 ```powershell
@@ -183,6 +187,8 @@ The SQLite/unit suite requires no SQL Server. The integration suite runs real CL
 | `date`, `datetime`, `datetime2`, `smalldatetime` | `TEXT` (ISO8601) |
 | `uniqueidentifier` | `TEXT` |
 | `varbinary`, `binary` | `BLOB` |
+
+SQL Server `decimal` and `numeric` values are read without narrowing to .NET `decimal`, supporting SQL Server's full precision and scale, including computed columns. They are converted to SQLite `REAL`, which stores approximate floating-point values and does not preserve exact decimal precision. Decimal values inside `sql_variant` are stored as text without this narrowing; other variants retain their existing text conversion.
 
 ## License
 

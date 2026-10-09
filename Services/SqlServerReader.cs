@@ -88,7 +88,9 @@ public class SqlServerReader : IAsyncDisposable
             SELECT 
                 COLUMN_NAME,
                 DATA_TYPE,
-                IS_NULLABLE
+                IS_NULLABLE,
+                NUMERIC_PRECISION,
+                NUMERIC_SCALE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = @schemaName AND TABLE_NAME = @tableName
             ORDER BY ORDINAL_POSITION";
@@ -109,6 +111,8 @@ public class SqlServerReader : IAsyncDisposable
                 {
                     SourceColumn = columnName,
                     SourceType = dataType,
+                    NumericPrecision = reader.IsDBNull(3) ? null : reader.GetByte(3),
+                    NumericScale = reader.IsDBNull(4) ? null : reader.GetInt32(4),
                     DestinationColumn = columnName,
                     DestinationType = TypeMapper.MapToSqlite(dataType),
                     IsNullable = isNullable,
